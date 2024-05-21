@@ -1,8 +1,9 @@
+
 ## Introduction
 
-Inno_space is a command-line tool designed for direct access to InnoDB (.ibd) files. It offers the capability to parse these files, providing detailed table information, and it can also assist in fixing corrupt pages. Inno_space converts .ibd files into human-readable formats, inspired by Jeremy Cole's inno_ruby. Unlike inno_ruby, Inno_space supports MySQL 8.0 and is implemented in C++, eliminating the need to set up a Ruby environment.
+A developing fork of Inno_space.
 
-An intriguing feature of Inno_space is its ability to bypass corrupt pages. In cases where a database won't start due to corruption in some pages, Inno_space can delete the corrupt page, allowing the database to start. This results in the loss of only one page, with other data remaining retrievable.
+Adding features: get leaf pages from innodb tablespaces, get records from system tablespaces and user tablespaces.
 
 ## Features
 
@@ -10,7 +11,8 @@ An intriguing feature of Inno_space is its ability to bypass corrupt pages. In c
 * Allows reading a specific block within the .ibd file.
 * Provides the capability to remove corrupt pages in .ibd files.
 * Supports updating page checksums.
-* **Supports dumping records from .ibd files.**
+* **(Adding) Supports dumping records from .ibd files.**
+* Get leaf pages from .ibd files, by scanning leaf segment.
 
 ## Usage
 
@@ -24,6 +26,8 @@ usage: inno [-h] [-f test/t.ibd] [-p page_num]
                 -c show-undo-file      -- show undo log detail
         -p page_num       -- show page information
                 -c show-records        -- show all records information
+                -c list-leaf-segment   -- show all leaf pages
+                -c dump-sys-tables      -- dump system tablespace records
         -u page_num       -- update page checksum
         -d page_num       -- delete page
 
@@ -234,10 +238,6 @@ then all the records on page num 10
 
 ```
 
-
-
-
-
 Read more about InnoDB file_space:
 
 https://blog.jcole.us/innodb/
@@ -245,4 +245,5 @@ https://blog.jcole.us/innodb/
 http://baotiao.github.io/2021/11/29/inno-space.html
 
 ### Contact Us
+
 If you have any questions or need assistance, feel free to contact the author at baotiao@gmail.com

@@ -7,6 +7,98 @@
 #include "include/fil0types.h"
 #include "include/fut0lst.h"
 #include "include/mach_data.h"
+#include "include/univ.i"
+
+/*                      PAGE DIRECTORY
+                        ==============
+*/
+
+typedef byte page_dir_slot_t;
+typedef page_dir_slot_t page_dir_t;
+
+/* Offset of the directory start down from the page end. We call the
+slot with the highest file address directory start, as it points to
+the first record in the list of records. */
+constexpr uint32_t PAGE_DIR = FIL_PAGE_DATA_END;
+
+/* We define a slot in the page directory as two bytes */
+constexpr uint32_t PAGE_DIR_SLOT_SIZE = 2;
+
+/* The offset of the physically lower end of the directory, counted from
+page end, when the page is empty */
+constexpr uint32_t PAGE_EMPTY_DIR_START = PAGE_DIR + 2 * PAGE_DIR_SLOT_SIZE;
+
+/* The maximum and minimum number of records owned by a directory slot. The
+number may drop below the minimum in the first and the last slot in the
+directory. */
+constexpr uint32_t PAGE_DIR_SLOT_MAX_N_OWNED = 8;
+constexpr uint32_t PAGE_DIR_SLOT_MIN_N_OWNED = 4;
+
+/* The infimum and supremum records are omitted from the compressed page.
+On compress, we compare that the records are there, and on uncompress we
+restore the records. */
+/** Extra bytes of an infimum record */
+static const byte infimum_extra[] = {
+    0x01,          /* info_bits=0, n_owned=1 */
+    0x00, 0x02     /* heap_no=0, status=2 */
+    /* ?, ?     */ /* next=(first user rec, or supremum) */
+};
+/** Data bytes of an infimum record */
+static const byte infimum_data[] = {
+    0x69, 0x6e, 0x66, 0x69, 0x6d, 0x75, 0x6d, 0x00 /* "infimum\0" */
+};
+/** Extra bytes and data bytes of a supremum record */
+static const byte supremum_extra_data[] = {
+    /* 0x0?, */ /* info_bits=0, n_owned=1..8 */
+    0x00,
+    0x0b, /* heap_no=1, status=3 */
+    0x00,
+    0x00, /* next=0 */
+    0x73,
+    0x75,
+    0x70,
+    0x72,
+    0x65,
+    0x6d,
+    0x75,
+    0x6d /* "supremum" */
+};
+
+/** Gets the start of a page.
+@param[in]  ptr     pointer to page frame
+@return start of the page */
+static inline page_t *page_align(const void *ptr);
+
+/** Gets the offset within a page.
+@param[in]  ptr     pointer to page frame
+@return offset from the start of the page */
+static inline ulint page_offset(const void *ptr);
+
+/** Gets the offset of the first record on the page.
+ @return offset of the first record in record list, relative from page */
+static inline ulint page_get_infimum_offset(
+    const page_t *page); /*!< in: page which must have record(s) */
+
+static inline const byte *page_get_infimum_rec(const byte *page) {
+  return page + page_get_infimum_offset(page);
+}
+
+/** Returns the nth record of the record list.
+ This is the inverse function of page_rec_get_n_recs_before().
+ @return nth record */
+[[nodiscard]] const rec_t *page_rec_get_nth_const(
+    const page_t *page, /*!< in: page */
+    ulint nth);         /*!< in: nth record */
+
+/** Returns the nth record of the record list.
+This is the inverse function of page_rec_get_n_recs_before().
+@param[in]      page    page
+@param[in]      nth     nth record
+@return nth record */
+[[nodiscard]] inline rec_t *page_rec_get_nth(page_t *page, ulint nth);
+
+#define page_dir_get_nth_slot(page, n) \
+  ((page) + (UNIV_PAGE_SIZE - PAGE_DIR - (n + 1) * PAGE_DIR_SLOT_SIZE))
 
 /*			PAGE HEADER
         ===========
@@ -281,4 +373,15 @@ ulint page_header_get_field(const page_t *page, ulint field);        /*!< in: PA
  *  @return number of user records */
 ulint page_dir_get_n_heap(const page_t *page);
 
+/** Gets the pointer to the next record on the page.
+ @return pointer to next record */
+rec_t *page_rec_get_next(rec_t *rec); /*!< in: pointer to record */
+
+/************************************************************//**
+Determine whether the page is a B-tree leaf.
+@return true if the page is a B-tree leaf (PAGE_LEVEL = 0) */
+bool
+page_is_leaf(
+/*=========*/
+  const page_t*   page);   /*!< in: page */
 #endif

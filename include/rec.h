@@ -178,6 +178,31 @@ static const uint8_t REC_N_FIELDS_TWO_BYTES_FLAG = 0x80;
 /** Max number of fields which can be stored in one byte */
 static const uint8_t REC_N_FIELDS_ONE_BYTE_MAX = 0x7F;
 
+/* Info bit denoting the predefined minimum record: this bit is set
+if and only if the record is the first user record on a non-leaf
+B-tree page that is the leftmost page on its level
+(PAGE_LEVEL is nonzero and FIL_PAGE_PREV is FIL_NULL). */
+constexpr uint32_t REC_INFO_MIN_REC_FLAG = 0x10UL;
+/** The deleted flag in info bits; when bit is set to 1, it means the record has
+ been delete marked */
+constexpr uint32_t REC_INFO_DELETED_FLAG = 0x20UL;
+/* Use this bit to indicate record has version */
+constexpr uint32_t REC_INFO_VERSION_FLAG = 0x40UL;
+/** The instant ADD COLUMN flag. When it is set to 1, it means this record
+was inserted/updated after an instant ADD COLUMN. */
+constexpr uint32_t REC_INFO_INSTANT_FLAG = 0x80UL;
+
+/* Number of extra bytes in an old-style record,
+in addition to the data and the offsets */
+constexpr uint32_t REC_N_OLD_EXTRA_BYTES = 6;
+/* Number of extra bytes in a new-style record,
+in addition to the data and the offsets */
+constexpr int32_t REC_N_NEW_EXTRA_BYTES = 5;
+/* Number of extra bytes in a new-style temporary record,
+in addition to the data and the offsets.
+This is used only after instant ADD COLUMN. */
+constexpr uint32_t REC_N_TMP_EXTRA_BYTES = 1;
+
 /** Gets a bit field from within 1 byte. */
 static inline ulint rec_get_bit_field_1(
     const rec_t *rec, /*!< in: pointer to record origin */
@@ -239,6 +264,13 @@ static inline ulint rec_get_info_bits(const rec_t *rec, ulint comp) {
   return (val);
 }
 
+/** The following function tells if an old-style record is versioned.
+@param[in]      rec     old-style (REDUNDANT) record
+@return true if it's versioned */
+static inline bool rec_old_is_versioned(const rec_t *rec) {
+  ulint info = rec_get_info_bits(rec, false);
+  return ((info & REC_INFO_VERSION_FLAG) != 0);
+}
 /** The following function is used to retrieve the info bits of a temporary
 record.
 @param[in]	rec	physical record
@@ -266,6 +298,16 @@ static inline uint16_t rec_get_n_fields_old_raw(
   ut_ad(ret > 0);
 
   return (ret);
+}
+
+/** The following function is used to test whether the data offsets in the
+ record are stored in one-byte or two-byte format.
+ @return true if 1-byte form */
+[[nodiscard]] static inline bool rec_get_1byte_offs_flag(
+    const rec_t *rec) /*!< in: physical record */
+{
+  return (rec_get_bit_field_1(rec, REC_OLD_SHORT, REC_OLD_SHORT_MASK,
+                              REC_OLD_SHORT_SHIFT));
 }
 
 #endif
