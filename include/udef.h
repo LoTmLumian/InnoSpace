@@ -11,4 +11,6 @@
 #define ut_ad assert
 #define ut_a assert
 
+#define UT_BITS_IN_BYTES(b) (((b) + 7) / 8)
+
 #endif

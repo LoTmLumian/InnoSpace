@@ -32,3 +32,13 @@ ulint page_dir_get_n_heap(const page_t *page) /*!< in: index page */
   return (page_header_get_field(page, PAGE_N_HEAP) & PAGE_N_HEAP_MASK);
 }
 
+/************************************************************//**
+Determine whether the page is a B-tree leaf.
+@return true if the page is a B-tree leaf (PAGE_LEVEL = 0) */
+bool
+page_is_leaf(
+/*=========*/
+  const page_t*   page)   /*!< in: page */
+{
+  return(!*(const uint16*) (page + (PAGE_HEADER + PAGE_LEVEL)));
+}

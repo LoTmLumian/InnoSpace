@@ -24,6 +24,7 @@ usage: inno [-h] [-f test/t.ibd] [-p page_num]
                 -c show-undo-file      -- show undo log detail
         -p page_num       -- show page information
                 -c show-records        -- show all records information
+                -c list-leaf-segment   -- show all leaf pages
         -u page_num       -- update page checksum
         -d page_num       -- delete page
 

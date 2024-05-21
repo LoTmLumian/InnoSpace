@@ -1,6 +1,7 @@
 
 #include <stdio.h>
 #include <stdint.h>
+#include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -13,6 +14,7 @@
 
 #include <cstdlib>
 #include <iostream>
+#include <set>
 
 #include <rapidjson/document.h>
 #include <rapidjson/error/en.h>
@@ -30,6 +32,7 @@
 #include "include/page0types.h"
 #include "include/rem0types.h"
 #include "include/rec.h"
+#include "include/ut0dbg.h"
 
 
 
@@ -966,6 +969,310 @@ static void fseg_print_low(space_id_t space_id,
   return;
 }
 
+/* TODO: check the return value of IO functions */
+void ShowLeafSegment() {
+  using page_array_t = std::set<ulint>;
+  using page_loc_t = std::pair<uint32_t, uint16_t>;
+  using ulint32_t = unsigned long int;
+
+  ut_set_leaf_segment_callback_for_swat();
+
+  struct stat stat_buf;
+  int ret = fstat(fd, &stat_buf);
+  int block = stat_buf.st_size / kPageSize;
+  int space_id;
+  int segment_page, segment_offset, segment_space_id;
+  int inode_segment_id, inode_magic;
+  /* 为简洁缩减字段量，生产不会使用 */
+  page_loc_t inode_first_free, inode_first_not_full, inode_first_full;
+  page_loc_t inode_last_free, inode_last_not_full, inode_last_full;
+  int free_list_length, not_full_list_length, full_list_length;
+
+  page_array_t pages;
+
+  auto free_xdes = [&](xdes_t* xdes_entry) -> void {
+    if (xdes_entry == nullptr)
+      return;
+    free(xdes_entry);
+  };
+
+  auto get_xdes_from_inode = [&](page_loc_t& inode_list_node) -> xdes_t* {
+    if (inode_list_node.first == FIL_NULL &&
+        inode_list_node.second + XDES_FLST_NODE)
+      return nullptr;
+
+    pread(fd, read_buf, kPageSize, inode_list_node.first * kPageSize);
+    int xdes_length = XDES_SIZE * sizeof(char);
+    xdes_t *xdes_entry = (xdes_t *) malloc(xdes_length + 1);
+    memcpy((char *) xdes_entry, (char *) read_buf + inode_list_node.second, XDES_SIZE);
+    
+    fprintf(stderr, "INFO: Reading XDES entry from page number: %d, offset: %d\n"
+                    "      Range in [%d, %d)\n", 
+                    inode_list_node.first,
+                    inode_list_node.second,
+                    inode_list_node.second,
+                    inode_list_node.second + XDES_SIZE);
+    int state = mach_read_from_4(xdes_entry + XDES_STATE);
+    fprintf(stderr, "INFO: XDES State = %d\n", mach_read_from_4(xdes_entry + XDES_STATE));
+    if (fil_page_get_type(read_buf) != FIL_PAGE_TYPE_XDES &&
+        fil_page_get_type(read_buf) != FIL_PAGE_TYPE_FSP_HDR) {
+      fprintf(stderr, "WARNING: Page type of first XDES Entry of not full extent != FIL_PAGE_TYPE_XDES\n");
+    }
+    return xdes_entry;
+  };
+
+  auto is_page_empty = [&](byte *page, int len) -> bool {
+    while(len--) {
+      if(*page++)
+        return false;
+    }
+    return true;
+  };
+
+  auto get_page_from_xdes = [&](xdes_t *&xdes_entry,     /* IN: xdes_entry is on xdes_page_id page, xdes_offset offset */ 
+                                      ulint32_t xdes_page_id,  /* IN: xdes_page_id indicates the xdes page */
+                                      uint16_t xdes_offset,    /* IN: xdes_offset indicates the offset of this xdes_entry */
+                                      int xdes_length,         /* IN: xdes_length is read from inode entry */
+                                      page_array_t &pages) -> void {
+    if (xdes_page_id != FIL_NULL)
+      return;
+    int xdes_state = mach_read_from_4(xdes_entry + XDES_STATE);
+    int i = 0;
+
+    ulint32_t xdes_next_page_id = xdes_page_id;
+    uint16_t xdes_next_offset = xdes_offset;
+
+    ulint32_t xdes_prev_page_id;
+    uint16_t xdes_prev_offset;
+
+    uint16_t xdes_no = (xdes_offset - XDES_ARR_OFFSET) / XDES_SIZE;
+    page_loc_t xdes_next = std::make_pair(xdes_page_id, xdes_offset);
+    do {
+      fprintf(stderr, "INFO: XDES page %d, \n"
+                      "      XDES offset: %d, \n"
+                      "      page_type: %d\n", xdes_next_page_id, xdes_next_offset, fil_page_get_type(read_buf));
+
+      unsigned char xdes_bitmap[UT_BITS_IN_BYTES(FSP_EXTENT_SIZE * XDES_BITS_PER_PAGE)];
+      /* Don't contain any user record */
+      if (xdes_state == XDES_FREE ||
+          xdes_state == XDES_FREE_FRAG)
+        return;
+      /* Parse Bitmap */
+      int i = XDES_BITMAP;
+      while (i < XDES_SIZE) {
+        xdes_bitmap[i - XDES_BITMAP] = mach_read_from_1(xdes_entry + i);
+        i++;
+      }
+      for (int j = 0; j < UT_BITS_IN_BYTES(FSP_EXTENT_SIZE * XDES_BITS_PER_PAGE); j++)
+      {
+        unsigned char curr_bitmap = xdes_bitmap[j];
+        for (int k = 0; k < 8; k += XDES_BITS_PER_PAGE)
+        {
+            bool curr_bit1 = (curr_bitmap >> (k + 1)) % 2;
+            bool curr_bit2 = (curr_bitmap >> (k)) % 2;
+            int page_id = (j * 8 + k) / XDES_BITS_PER_PAGE + xdes_no * FSP_EXTENT_SIZE + xdes_next_page_id;
+            pread(fd, read_buf, kPageSize, kPageSize * page_id);
+            if (fil_page_get_type(read_buf) == FIL_PAGE_INDEX &&
+                page_is_leaf(read_buf)) {
+              if (!curr_bit2)
+                pages.insert(page_id);
+              fprintf(stderr, "INFO: Find %s leaf page %d from XDES page %d, \n"
+                              "      free bit1 is %d, \n"
+                              "      free bit2 is %d. \n", 
+                             curr_bit2 ? "invalid" : "valid" ,
+                             page_id, 
+                             xdes_next_page_id,
+                             curr_bit1,
+                             curr_bit2);
+            }
+            else
+              goto loop_end;
+        }
+      }
+    loop_end:
+      /* Read next XDES and get its checksum */
+      xdes_next_page_id = mach_read_from_4(xdes_entry + XDES_FLST_NODE + FIL_ADDR_SIZE + FIL_ADDR_PAGE);
+      xdes_prev_page_id = mach_read_from_4(xdes_entry + XDES_FLST_NODE + FIL_ADDR_PAGE);
+      xdes_next_offset = mach_read_from_2(xdes_entry + XDES_FLST_NODE + FIL_ADDR_SIZE + FIL_ADDR_BYTE) - XDES_FLST_NODE;
+      xdes_prev_offset = mach_read_from_2(xdes_entry + XDES_FLST_NODE + FIL_ADDR_BYTE) - XDES_FLST_NODE;
+      xdes_next = std::make_pair(xdes_next_page_id, xdes_next_offset);
+      xdes_no = (xdes_next_offset - XDES_ARR_OFFSET) / XDES_SIZE;
+      fprintf(stderr, "INFO: Get next page (%d, %d), prev page (%d, %d)\n",
+                      xdes_next_page_id, xdes_next_offset,
+                      xdes_prev_page_id, xdes_prev_offset);
+      if (xdes_next_page_id == FIL_NULL)
+        break;
+      pread(fd, read_buf, kPageSize, kPageSize * xdes_next_page_id);
+
+      ulint32_t fil_hdr_checksum = mach_read_from_4(read_buf + FIL_PAGE_SPACE_OR_CHKSUM);
+      ulint32_t fil_end_checksum = mach_read_from_4(read_buf + kPageSize - FIL_PAGE_END_LSN_OLD_CHKSUM);
+
+      if (is_page_empty(read_buf, kPageSize))
+        break;
+      if (xdes_next_offset + XDES_FLST_NODE == 0)
+        break;
+      if (fil_hdr_checksum != fil_end_checksum) {
+          fprintf(stderr, "WARNING: Page %d is partial written, "
+                          "         please try to scan whole file...\n", xdes_next_page_id);
+      }
+      /* Calc & check the checksum
+       * Assume that use default value of innodb variable innodb_checksum_algorithm (crc32) */
+      ulint32_t calc_checksum = buf_calc_page_crc32(read_buf, 0);
+      fprintf(stderr, "INFO: Page %d checksum is %lld,\n"
+                      "      Calc checksum is %lld\n", 
+                      xdes_next_page_id, fil_hdr_checksum, calc_checksum);
+
+      ut_a(fil_hdr_checksum == calc_checksum);
+
+      free(xdes_entry);
+      xdes_entry = get_xdes_from_inode(xdes_next);
+
+    } while (++i < xdes_length);
+  };
+
+  auto show_pages = [&](page_array_t& pages) -> void {
+    int level;
+    int type;
+    int next_page;
+    int prev_page;
+    int page_n_recs;
+    int total_recs = 0;
+    fprintf(stderr, "INFO: Dump pages of space, total page number: %d\n", pages.size());
+    for (auto it = pages.begin(); it != pages.end(); true)
+    {
+      int page = *it;
+      /* Check pages */
+      pread(fd, read_buf, kPageSize, page * kPageSize);
+      level = mach_read_from_2(read_buf + FIL_PAGE_DATA + PAGE_LEVEL);
+      if (level != 0) {
+        fprintf(stderr, "WARNING: page %d is not leaf, on level: %d\n", page, level);
+        goto next;
+      }
+      type = fil_page_get_type(read_buf);
+      if (type != FIL_PAGE_INDEX) {
+        fprintf(stderr, "WARNING: page %d is not index page\n", page, type);
+        goto next;
+      }
+      page_n_recs = mach_read_from_2(read_buf + FIL_PAGE_DATA + PAGE_N_RECS);
+      next_page = mach_read_from_4(read_buf + FIL_PAGE_NEXT);
+      prev_page = mach_read_from_4(read_buf + FIL_PAGE_PREV);
+      fprintf(stderr, "INFO: page %d has %d records, prev page is %d and next page is %d\n",
+              page, page_n_recs, prev_page, next_page);
+      /* debug */
+      if (next_page != FIL_NULL && pages.find(next_page) == pages.end())
+      {
+        pages.insert(next_page);
+        fprintf(stderr, "WARNING: get leaf page by scanning b+ tree\n");
+      }
+      if (prev_page != FIL_NULL && pages.find(prev_page) == pages.end())
+      {
+        pages.insert(prev_page);
+        fprintf(stderr, "ERROR: some previous page are ignored\n");
+      }
+      total_recs += page_n_recs;
+next:
+      it = pages.upper_bound(*it);
+    }
+    fprintf(stderr, "INFO: all page has %d records\n", total_recs);
+  };
+
+  int i = 0;
+  /* Get root page */
+  while (i < block) {
+    uint64_t offset = i * kPageSize;
+    pread(fd, read_buf, kPageSize, offset);
+    int type = fil_page_get_type(read_buf);
+    if (i == 0)
+        space_id = mach_read_from_4(read_buf + FSP_SPACE_ID);
+    if (type == FIL_PAGE_INDEX) {
+        fprintf(stderr, "INFO: Get index root page on page number: %d\n", i);
+        break;
+    }
+    i++;
+  }
+  int level = mach_read_from_2(read_buf + PAGE_LEVEL + FIL_PAGE_DATA);
+  if (level == 0) {
+    fprintf(stderr, "INFO: Only root page is leaf page.\n");
+    pages.insert(i);
+  } else
+    fprintf(stderr, "INFO: Root page is on level %d\n", level);
+
+  fseg_header_t* seg_header = read_buf + PAGE_BTR_SEG_LEAF + FIL_PAGE_DATA;
+  segment_space_id = mach_read_from_4(seg_header + FSEG_HDR_SPACE);
+  segment_page = mach_read_from_4(seg_header + FSEG_HDR_PAGE_NO);
+  segment_offset = mach_read_from_2(seg_header + FSEG_HDR_OFFSET);
+  fprintf(stderr, "INFO: Get leaf segment inode from page number: %d, page offset: %d\n", segment_page, segment_offset);
+
+  /* Get segment Inode */
+  pread(fd, read_buf, kPageSize, segment_page * kPageSize);
+  fseg_inode_t *inode = read_buf + segment_offset;
+  inode_segment_id = mach_read_from_8(inode + FSEG_ID);
+  inode_magic = mach_read_from_4(inode + FSEG_MAGIC_N);
+  if (inode_magic != FSEG_MAGIC_N_VALUE) {
+      fprintf(stderr, "ERROR: Get wrong inode magic number\n");
+  } else
+      fprintf(stderr, "INFO: inode magic number checked\n");
+
+  inode_first_free = std::make_pair(mach_read_from_4(inode + FSEG_FREE + 4 + FIL_ADDR_PAGE), 
+                                    mach_read_from_2(inode + FSEG_FREE + 4 + FIL_ADDR_BYTE) - XDES_FLST_NODE);
+  free_list_length = mach_read_from_4(inode + FSEG_FREE);
+
+  inode_first_not_full = std::make_pair(mach_read_from_4(inode + FSEG_NOT_FULL + 4 + FIL_ADDR_PAGE),
+                                        mach_read_from_2(inode + FSEG_NOT_FULL + 4 + FIL_ADDR_BYTE) - XDES_FLST_NODE);
+  not_full_list_length = mach_read_from_4(inode + FSEG_NOT_FULL);
+
+  inode_first_full = std::make_pair(mach_read_from_4(inode + FSEG_FULL + 4 + FIL_ADDR_PAGE),
+                                    mach_read_from_2(inode + FSEG_FULL + 4 + FIL_ADDR_BYTE) - XDES_FLST_NODE);
+  full_list_length = mach_read_from_4(inode + FSEG_FULL);
+
+  inode_last_free = std::make_pair(mach_read_from_4(inode + FSEG_FREE + 4 + FIL_ADDR_SIZE + FIL_ADDR_PAGE),
+                                   mach_read_from_2(inode + FSEG_FREE + 4 + FIL_ADDR_SIZE + FIL_ADDR_BYTE) - XDES_FLST_NODE);
+  
+  inode_last_not_full = std::make_pair(mach_read_from_4(inode + FSEG_NOT_FULL + 4 + FIL_ADDR_SIZE + FIL_ADDR_PAGE),
+                                       mach_read_from_2(inode + FSEG_NOT_FULL + 4 + FIL_ADDR_SIZE + FIL_ADDR_BYTE) - XDES_FLST_NODE);
+
+  inode_last_full = std::make_pair(mach_read_from_4(inode + FSEG_FULL + 4 + FIL_ADDR_SIZE + FIL_ADDR_PAGE),
+                                   mach_read_from_2(inode + FSEG_FULL + 4 + FIL_ADDR_SIZE + FIL_ADDR_BYTE) - XDES_FLST_NODE);
+
+  fprintf(stderr, "INFO: Read from leaf segment inode...\n"
+                  "      length of free XDES list: %d, (page, offset) = (%d, %d)\n"
+                  "      length of not full XDES list: %d, (page, offset) = (%d, %d)\n"
+                  "      length of full XDES list: %d,  (page, offset) = (%d, %d)\n", 
+                  free_list_length, inode_first_free.first, inode_first_free.second,
+                  not_full_list_length, inode_first_not_full.first, inode_first_not_full.second,
+                  full_list_length, inode_first_full.first, inode_first_full.second);
+  /* Get fragment pages */
+  for (fseg_inode_t *offset = inode + FSEG_FRAG_ARR;
+       offset < inode + FSEG_FRAG_ARR + FSEG_FRAG_ARR_N_SLOTS * FSEG_FRAG_SLOT_SIZE;
+       offset += FSEG_FRAG_SLOT_SIZE) {
+    ulint32_t page_id = mach_read_from_4(offset);
+    if (page_id != FIL_NULL) {
+      pages.insert(page_id);
+      fprintf(stderr, "INFO: Find leaf page %d from fragment array\n", page_id);
+    }
+  }
+
+  xdes_t *xdes_first_free = get_xdes_from_inode(inode_first_free);
+  get_page_from_xdes(xdes_first_free, inode_first_free.first, inode_first_free.second, 
+                           free_list_length, pages);
+
+  xdes_t *xdes_first_not_full = get_xdes_from_inode(inode_first_not_full);
+  get_page_from_xdes(xdes_first_not_full, inode_first_not_full.first, inode_first_not_full.second, 
+                           not_full_list_length, pages);
+
+  xdes_t *xdes_first_full = get_xdes_from_inode(inode_first_full);
+  get_page_from_xdes(xdes_first_full, inode_first_full.first, inode_first_full.second, 
+                           full_list_length, pages);
+
+  show_pages(pages);
+
+  free_xdes(xdes_first_free);
+  free_xdes(xdes_first_not_full);
+  free_xdes(xdes_first_full);
+
+  ut_reset_assert_callback();
+}
+
 void ShowIndexSummary() {
   struct stat stat_buf;
   int ret = fstat(fd, &stat_buf);
@@ -1202,6 +1509,14 @@ int main(int argc, char *argv[]) {
       ShowUndoFile();
     } else if (strcmp(command, "dump-all-records") == 0) {
       DumpAllRecords();
+    } else if (strcmp(command, "list-leaf-segment") == 0) {
+      try {
+        ShowLeafSegment();
+      } catch (std::logic_error const& logic_exp) {
+        fprintf(stderr, "Exception occurs: %s\nTry to scan whole file...\n", logic_exp.what());
+        /* JUST take pages which level is 0 and page type index... */
+        ShowSpacePageType();
+      }
     }
   } else {
     uint16_t type = 0;

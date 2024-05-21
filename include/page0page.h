@@ -281,4 +281,11 @@ ulint page_header_get_field(const page_t *page, ulint field);        /*!< in: PA
  *  @return number of user records */
 ulint page_dir_get_n_heap(const page_t *page);
 
+/************************************************************//**
+Determine whether the page is a B-tree leaf.
+@return true if the page is a B-tree leaf (PAGE_LEVEL = 0) */
+bool
+page_is_leaf(
+/*=========*/
+  const page_t*   page);   /*!< in: page */
 #endif
